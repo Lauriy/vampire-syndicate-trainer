@@ -1,0 +1,39 @@
+[project]
+name = "vstrainer"
+version = "0.1.0"
+description = "Memory trainer for Vampire Syndicate: Gangs of Moonfall"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pymem",
+    "numpy",
+]
+
+[project.scripts]
+vstrainer = "vstrainer.ue_trainer:run"
+
+[dependency-groups]
+dev = ["ruff", "ty"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D203",    # incompatible with D211 (we keep "no blank line before class")
+    "D213",    # incompatible with D212 (we keep "summary on the first line")
+    "COM812",  # trailing commas are the formatter's job
+    "T201",    # this is an interactive CLI — print() is the user interface
+]
+
+[tool.ty.rules]
+unresolved-attribute = "ignore"     # pymem.Pymem dynamic read_*/write_* helpers

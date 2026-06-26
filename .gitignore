@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.idea/
+*.CT
+.vstrainer_hot.json
+.uecache/
