@@ -37,8 +37,10 @@ reflection**:
 
 1. **Identify the gang the right way.** It reads UE's `GNames` and walks the live object
    table to find unit objects, then filters by the game's own `bAiControlled` flag
-   (`false` = your gang, `true` = enemy). From each gang unit it reads a **stable
-   fingerprint** (stats that never change — Initiative, Melee, etc.).
+   (`false` = your gang, `true` = enemy). From each gang unit it reads a
+   **fingerprint** from attribute stats (Initiative, Melee, etc.) that don't deplete
+   in combat. If you later level a unit, its fingerprint goes stale — the trainer
+   notices that member stops matching and re-derives it automatically.
 2. **Pin the values that drive the display.** The on-screen move/AP come from
    `Stat.Move` / `Stat.ActionPoints` records, which exist as *many* byte-identical copies;
    only one is authoritative. Each tick the trainer structurally scans the heap and pins

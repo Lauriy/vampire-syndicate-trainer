@@ -6,13 +6,17 @@ record among its many byte-identical copies:
 
   1. From the object table, find unit objects with bAiControlled == 0 (your gang)
      that have a stat-record pointer at unit+UNIT_RECORD_PTR, and read each member's
-     stable fingerprint (Initiative/Melee/Ranged/PHY -- stats that never deplete).
+     fingerprint from attribute stats (Initiative/Melee/Ranged/PHY). These don't
+     DEPLETE in combat, so a fingerprint holds for a whole battle -- but they DO
+     change when you level a unit, so a stale one gets re-derived (see step 3).
   2. Each tick, structurally scan the heap for stat-record blocks (fast: hot-region
      rescans between occasional full scans) and pin Stat.Move / Stat.ActionPoints to
      the sentinel in EVERY block whose fingerprint matches a gang member. Pinning all
      copies guarantees the authoritative one (the display driver) is hit; enemies
      (different fingerprints) are never touched.
-  3. Self-heal: rebuild on a new battle, and re-attach when the game restarts.
+  3. Self-heal: re-derive fingerprints when the gang goes missing (new battle) or a
+     member stops matching (it was leveled, so its fingerprint went stale), and
+     re-attach when the game restarts.
 
 No value typing, no PID hunting, no enemy collisions.
 """
@@ -52,12 +56,22 @@ class _Tick:
     gang_blocks: list[StatBlock] = field(default_factory=list)
     reverted: int = 0
     addresses: set[int] = field(default_factory=set)
+    matched_fps: set[Fingerprint] = field(default_factory=set)
     hot: set[int] = field(default_factory=set)
     n_blocks: int = 0
     snap_s: float = 0.0
     scan_s: float = 0.0
     appeared: int = 0  # copies that appeared since last tick (heap churn)
     gone: int = 0  # copies that disappeared since last tick
+
+
+@dataclass
+class _HealState:
+    """Full-scan counters that decide when to re-derive fingerprints."""
+
+    empty_fulls: int = 0  # consecutive full scans with the gang fully absent
+    incomplete_fulls: int = 0  # consecutive full scans missing a cached fingerprint
+    last_rebuild: float = 0.0  # rate-limits rebuilds (REBUILD_MIN_INTERVAL)
 
 
 def _u8(ue: UE, addr: int) -> int | None:
@@ -101,8 +115,9 @@ def _gang_fingerprints(ue: UE) -> set[Fingerprint]:
     """Derive each gang member's stable fingerprint from the object table.
 
     Robust: scan 'Unit'-ish objects directly for bAiControlled==0 with a record
-    block (class derivation misses BP_Unit_Stats_Anim_C). Stale objects are fine --
-    the fingerprint doesn't change, and the broad pin finds the live copies anyway.
+    block (class derivation misses BP_Unit_Stats_Anim_C). Re-derived from ground
+    truth, so it tracks a member whose attribute stats changed (leveling) -- the
+    loop calls this again once a member's old fingerprint stops matching.
     """
     zero = tuple(0.0 for _ in c.FP_INDICES)
     fingerprints: set[Fingerprint] = set()
@@ -126,7 +141,7 @@ def _gang_fingerprints(ue: UE) -> set[Fingerprint]:
 
 
 def _load_gang_fps() -> set[Fingerprint]:
-    """Load cached gang fingerprints from a prior session (stable per member)."""
+    """Load last session's fingerprints as a warm start (may be stale; self-heals)."""
     if not GANG_FPS_PATH.exists():
         return set()
     try:
@@ -206,7 +221,9 @@ def _scan_and_pin(
 
     result = _Tick(n_blocks=len(blocks), snap_s=snap_s, scan_s=scan_s)
     for block in blocks:
-        if _fp_of_block(block, region_data) in gang_fps:
+        fingerprint = _fp_of_block(block, region_data)
+        if fingerprint in gang_fps:
+            result.matched_fps.add(fingerprint)
             result.gang_blocks.append(block)
             result.addresses.add(block.object_start)
             result.hot.add(block.region_base)
@@ -224,23 +241,57 @@ def _scan_and_pin(
     return result
 
 
-def _maybe_rebuild(
-    ue: UE, gang_fps: set[Fingerprint], empty_fulls: int, last_rebuild: float
+def _refresh_gang(
+    ue: UE, gang_fps: set[Fingerprint], last_rebuild: float, *, merge: bool
 ) -> tuple[set[Fingerprint], float]:
-    """Rebuild the object table and re-derive fingerprints when the gang is lost."""
-    if (
-        empty_fulls >= c.EMPTY_FULLS_BEFORE_REBUILD
-        and time.time() - last_rebuild > c.REBUILD_MIN_INTERVAL
-        and _alive(ue)
-    ):
-        ue.build_objects(rebuild=True)
-        fresh = _gang_fingerprints(ue)
-        if fresh:
-            gang_fps = fresh
-            _save_gang_fps(gang_fps)
-        last_rebuild = time.time()
+    """Rebuild the object table and re-derive gang fingerprints (rate-limited).
 
-    return gang_fps, last_rebuild
+    merge -- union the fresh fingerprints into the existing set instead of
+    replacing it, so a partial or glitchy rebuild can never drop a member that is
+    currently being pinned. Used for the stale-fingerprint (leveled) case.
+    """
+    if time.time() - last_rebuild <= c.REBUILD_MIN_INTERVAL or not _alive(ue):
+        return gang_fps, last_rebuild
+    ue.build_objects(rebuild=True)
+    fresh = _gang_fingerprints(ue)
+    if fresh:
+        gang_fps = (gang_fps | fresh) if merge else fresh
+        _save_gang_fps(gang_fps)
+
+    return gang_fps, time.time()
+
+
+def _self_heal(
+    ue: UE, gang_fps: set[Fingerprint], result: _Tick, heal: _HealState
+) -> set[Fingerprint]:
+    """On a full scan, re-derive fingerprints when the gang looks lost or stale.
+
+    Counters advance only on full scans (hot ticks leave them alone), so the
+    thresholds count consecutive full scans. Two failure modes self-heal:
+      * gang fully absent (battle/gang changed) -> rebuild and REPLACE the set.
+      * a cached fingerprint never matched while others did -> that member was
+        likely leveled (its 'stable' stats changed), so its fingerprint is stale;
+        rebuild and MERGE, adding the new fingerprint without dropping anyone.
+    """
+    if not result.gang_blocks:
+        heal.empty_fulls += 1
+        heal.incomplete_fulls = 0
+    elif gang_fps - result.matched_fps:
+        heal.incomplete_fulls += 1
+        heal.empty_fulls = 0
+    else:
+        heal.empty_fulls = heal.incomplete_fulls = 0
+
+    if heal.empty_fulls >= c.EMPTY_FULLS_BEFORE_REBUILD:
+        gang_fps, heal.last_rebuild = _refresh_gang(
+            ue, gang_fps, heal.last_rebuild, merge=False
+        )
+    elif heal.incomplete_fulls >= c.INCOMPLETE_FULLS_BEFORE_REBUILD:
+        gang_fps, heal.last_rebuild = _refresh_gang(
+            ue, gang_fps, heal.last_rebuild, merge=True
+        )
+
+    return gang_fps
 
 
 def _print_tick(tick: int, result: _Tick, hot: set[int], *, full: bool) -> None:
@@ -267,8 +318,8 @@ def _freeze_loop(ue: UE, *, debug: bool) -> None:
     gang_fps = _setup_fingerprints(ue)
     print("Pinning ALL record copies matching a gang fingerprint.\n")
 
-    hot, prev_addresses, tick, stable, empty_fulls = set(), set(), 0, 0, 0
-    last_rebuild = 0.0
+    hot, prev_addresses, tick, stable = set(), set(), 0, 0
+    heal = _HealState()
     while True:
         loop_start = time.time()
         if not _alive(ue):
@@ -279,13 +330,8 @@ def _freeze_loop(ue: UE, *, debug: bool) -> None:
         result = _scan_and_pin(ue, gang_fps, hot, full=full)
         if result.hot:
             hot = result.hot
-        if full and not result.gang_blocks:
-            empty_fulls += 1
-            gang_fps, last_rebuild = _maybe_rebuild(
-                ue, gang_fps, empty_fulls, last_rebuild
-            )
-        else:
-            empty_fulls = 0
+        if full:  # only full scans see the whole gang, so heal off them
+            gang_fps = _self_heal(ue, gang_fps, result, heal)
         result.appeared = len(result.addresses - prev_addresses)
         result.gone = len(prev_addresses - result.addresses)
         prev_addresses = result.addresses

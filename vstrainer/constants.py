@@ -68,7 +68,11 @@ UNIT_RECORD_PTR = 0x4C8  # -> the unit's live stat-record block
 # --- pin / fingerprint -----------------------------------------------------
 SENTINEL = 9_999_999.0  # frozen move/AP value
 SENTINEL_MIN = 900_000.0  # "already pinned" threshold
-FP_INDICES = (4, 5, 6, 7)  # Initiative/Melee/Ranged/PHY — stable per unit
+# Attribute stats (Initiative/Melee/Ranged/PHY) used as a per-unit fingerprint.
+# They don't DEPLETE in combat, so a fingerprint is stable for a whole battle --
+# but they DO change when you level a unit between battles, so a fingerprint is
+# only valid until then. The loop re-derives one once it stops matching.
+FP_INDICES = (4, 5, 6, 7)
 FP_PRECISION = 1  # rounding digits for fingerprint match
 
 # --- freeze-loop tuning ----------------------------------------------------
@@ -79,7 +83,10 @@ TICK_SLOW = 1.5  # interval when stable
 STABLE_TICKS_FOR_SLOW = 4  # quiet ticks before slowing down
 DEBUG_INITIAL_TICKS = 3  # print the first few ticks regardless, for visibility
 REBUILD_MIN_INTERVAL = 20.0  # s between fallback object-table rebuilds
-EMPTY_FULLS_BEFORE_REBUILD = 2
+EMPTY_FULLS_BEFORE_REBUILD = 2  # empty full scans (gang lost) before a rebuild
+# full scans where a cached fingerprint never matched (a member was likely
+# leveled, so its fingerprint is stale) before re-deriving it
+INCOMPLETE_FULLS_BEFORE_REBUILD = 2
 SNAPSHOT_THREADS = 8  # parallel RPM workers for big (build) reads
 STREAM_BATCH_BYTES = (
     256 * 1024 * 1024
