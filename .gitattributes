@@ -1,0 +1,8 @@
+# Normalize line endings to LF in the repository AND in working trees on every
+# OS, regardless of each contributor's core.autocrlf. Overrides core.autocrlf=true
+# (which otherwise rewrites these files to CRLF on checkout and warns on `git add`).
+* text=auto eol=lf
+
+# uv lockfile is plain text; keep it LF too (covered by the rule above, explicit
+# for clarity).
+uv.lock text eol=lf
